@@ -413,6 +413,104 @@ class ExtendedClient(BaseExchangeClient):
 
         return OrderResult(success=False, error_message='Max retries exceeded')
 
+    async def place_limit_order(
+        self,
+        contract_id: str,
+        quantity: Decimal,
+        price: Decimal,
+        side: str,
+        *,
+        post_only: bool = True,
+        reduce_only: bool = False,
+    ) -> OrderResult:
+        """
+        Place a limit order with Extended at a specified price.
+
+        Notes:
+        - Extended SDK supports post-only orders. reduce_only is not currently exposed in the SDK we use,
+          so this parameter is accepted for strategy compatibility but ignored.
+        - Price is adjusted to remain maker when post_only=True.
+        """
+        max_retries = 15
+        retry_count = 0
+
+        while retry_count < max_retries:
+            try:
+                best_bid, best_ask = await self.fetch_bbo_prices(contract_id)
+                if best_bid <= 0 or best_ask <= 0:
+                    return OrderResult(success=False, error_message='Invalid bid/ask prices')
+
+                order_side = OrderSide.BUY if side.lower() == 'buy' else OrderSide.SELL
+                adjusted_price = Decimal(price)
+
+                if post_only:
+                    if side.lower() == 'sell':
+                        # ensure maker: sell price must be above best bid
+                        if adjusted_price <= best_bid:
+                            adjusted_price = best_bid + self.config.tick_size
+                    else:
+                        # ensure maker: buy price must be below best ask
+                        if adjusted_price >= best_ask:
+                            adjusted_price = best_ask - self.config.tick_size
+
+                rounded_price = self.round_to_tick(adjusted_price)
+                quantity = quantity.quantize(self.min_order_size, rounding=ROUND_HALF_UP)
+
+                order_result = await self.perpetual_trading_client.place_order(
+                    market_name=contract_id,
+                    amount_of_synthetic=quantity,
+                    price=rounded_price,
+                    side=order_side,
+                    time_in_force=TimeInForce.GTT,
+                    post_only=post_only,
+                    expire_time=utc_now() + timedelta(days=90),
+                )
+
+                if not order_result or not order_result.data or order_result.status != 'OK':
+                    return OrderResult(success=False, error_message='Failed to place order')
+
+                order_id = order_result.data.id
+                if not order_id:
+                    return OrderResult(success=False, error_message='No order ID in response')
+
+                # Check order status quickly for post-only rejection
+                await asyncio.sleep(0.01)
+                order_info = await self.get_order_info(order_id)
+                if order_info:
+                    if order_info.status in ['CANCELED', 'REJECTED']:
+                        if retry_count < max_retries - 1:
+                            retry_count += 1
+                            continue
+                        return OrderResult(success=False, error_message=f'Order rejected after {max_retries} attempts')
+
+                    if order_info.status in ['NEW', 'OPEN', 'PARTIALLY_FILLED', 'FILLED']:
+                        return OrderResult(
+                            success=True,
+                            order_id=order_id,
+                            side=side.lower(),
+                            size=quantity,
+                            price=rounded_price,
+                            status=order_info.status
+                        )
+
+                # If we cannot fetch info, assume success
+                return OrderResult(
+                    success=True,
+                    order_id=order_id,
+                    side=side.lower(),
+                    size=quantity,
+                    price=rounded_price,
+                )
+
+            except Exception as e:
+                if retry_count < max_retries - 1:
+                    retry_count += 1
+                    await asyncio.sleep(0.1)
+                    continue
+                return OrderResult(success=False, error_message=str(e))
+
+        return OrderResult(success=False, error_message='Max retries exceeded')
+
     async def cancel_order(self, order_id: str) -> OrderResult:
         """Cancel an order with Extended using the internal order ID."""
         try:

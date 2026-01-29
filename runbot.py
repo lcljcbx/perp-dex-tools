@@ -12,6 +12,7 @@ import dotenv
 from decimal import Decimal
 from trading_bot import TradingBot, TradingConfig
 from exchanges import ExchangeFactory
+from grid_bot import GridBot, GridConfig
 
 
 def parse_arguments():
@@ -50,6 +51,24 @@ def parse_arguments():
     parser.add_argument('--boost', action='store_true',
                         help='Use the Boost mode for volume boosting')
 
+    # Strategy selection
+    parser.add_argument('--strategy', type=str, default='maker_tp', choices=['maker_tp', 'grid'],
+                        help="Strategy to run: 'maker_tp' (default) or 'grid'")
+
+    # Grid strategy parameters (used when --strategy grid)
+    parser.add_argument('--grid-direction', type=str, default='long', choices=['long', 'short'],
+                        help="Grid direction (default: long)")
+    parser.add_argument('--grid-spacing', type=str, default='arith', choices=['arith', 'geo'],
+                        help="Grid spacing mode: arith (equal difference) or geo (equal ratio) (default: arith)")
+    parser.add_argument('--grid-lower', type=Decimal, default=Decimal('-1'),
+                        help="Grid lower price bound (required for grid strategy)")
+    parser.add_argument('--grid-upper', type=Decimal, default=Decimal('-1'),
+                        help="Grid upper price bound (required for grid strategy)")
+    parser.add_argument('--grid-grids', type=int, default=10,
+                        help="Number of grid levels (default: 10)")
+    parser.add_argument('--grid-size', type=Decimal, default=Decimal('-1'),
+                        help="Per-grid order size (required for grid strategy)")
+
     return parser.parse_args()
 
 
@@ -86,6 +105,9 @@ def setup_logging(log_level: str):
 async def main():
     """Main entry point."""
     args = parse_arguments()
+    print("args:")
+    print(args)
+    print('*' * 50)
 
     # Setup logging first
     setup_logging("WARNING")
@@ -103,30 +125,51 @@ async def main():
     dotenv.load_dotenv(args.env_file)
 
     # Create configuration
-    config = TradingConfig(
-        ticker=args.ticker.upper(),
-        contract_id='',  # will be set in the bot's run method
-        tick_size=Decimal(0),
-        quantity=args.quantity,
-        take_profit=args.take_profit,
-        direction=args.direction.lower(),
-        max_orders=args.max_orders,
-        wait_time=args.wait_time,
-        exchange=args.exchange.lower(),
-        grid_step=Decimal(args.grid_step),
-        stop_price=Decimal(args.stop_price),
-        pause_price=Decimal(args.pause_price),
-        boost_mode=args.boost
-    )
+    if args.strategy == 'grid':
+        if args.grid_lower <= 0 or args.grid_upper <= 0:
+            raise ValueError("--grid-lower and --grid-upper must be set (> 0) when --strategy grid")
+        if args.grid_size <= 0:
+            raise ValueError("--grid-size must be set (> 0) when --strategy grid")
 
-    # Create and run the bot
-    bot = TradingBot(config)
-    try:
+        grid_config = GridConfig(
+            exchange=args.exchange.lower(),
+            ticker=args.ticker.upper(),
+            quantity=args.quantity,
+            contract_id='',  # will be set in bot.run()
+            tick_size=Decimal(0),
+            direction=args.grid_direction,
+            spacing=args.grid_spacing,
+            lower=args.grid_lower,
+            upper=args.grid_upper,
+            grids=args.grid_grids,
+            grid_size=args.grid_size,
+        )
+
+        bot = GridBot(grid_config)
         await bot.run()
-    except Exception as e:
-        print(f"Bot execution failed: {e}")
-        # The bot's run method already handles graceful shutdown
-        return
+    else:
+        config = TradingConfig(
+            ticker=args.ticker.upper(),
+            contract_id='',  # will be set in the bot's run method
+            tick_size=Decimal(0),
+            quantity=args.quantity,
+            take_profit=args.take_profit,
+            direction=args.direction.lower(),
+            max_orders=args.max_orders,
+            wait_time=args.wait_time,
+            exchange=args.exchange.lower(),
+            grid_step=Decimal(args.grid_step),
+            stop_price=Decimal(args.stop_price),
+            pause_price=Decimal(args.pause_price),
+            boost_mode=args.boost
+        )
+
+        bot = TradingBot(config)
+        try:
+            await bot.run()
+        except Exception as e:
+            print(f"Bot execution failed: {e}")
+            return
 
 
 if __name__ == "__main__":

@@ -286,6 +286,24 @@ ETH：
 python runbot.py --exchange extended --ticker ETH --quantity 0.1 --take-profit 0 --max-orders 40 --wait-time 450 --grid-step 0.1
 ```
 
+### Extended 网格交易（区间网格，等差/等比，支持多/空）
+
+使用 `--strategy grid` 启动网格策略（需要配置区间、网格数量、每格下单大小、方向与间隔模式）：
+
+```bash
+python runbot.py --exchange extended --strategy grid --ticker ETH \
+  --grid-direction long --grid-spacing arith \
+  --grid-lower 1800 --grid-upper 2200 --grid-grids 21 --grid-size 0.02
+```
+
+做空网格 + 等比间隔示例：
+
+```bash
+python runbot.py --exchange extended --strategy grid --ticker ETH \
+  --grid-direction short --grid-spacing geo \
+  --grid-lower 1800 --grid-upper 2200 --grid-grids 21 --grid-size 0.02
+```
+
 ## 🆕 对冲模式 (Hedge Mode)
 
 新增的对冲模式 (`hedge_mode.py`) 是一个新的交易策略，通过同时在两个交易所进行对冲交易来降低风险：

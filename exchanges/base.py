@@ -127,3 +127,21 @@ class BaseExchangeClient(ABC):
     def get_exchange_name(self) -> str:
         """Get the exchange name."""
         pass
+
+    async def place_limit_order(
+        self,
+        contract_id: str,
+        quantity: Decimal,
+        price: Decimal,
+        side: str,
+        *,
+        post_only: bool = True,
+        reduce_only: bool = False,
+    ) -> OrderResult:
+        """
+        Place a limit order at a specified price.
+
+        Not all exchanges support this in the current codebase; strategies that need
+        explicit price control (e.g. grid trading) can use this when implemented.
+        """
+        raise NotImplementedError(f"{self.get_exchange_name()} does not implement place_limit_order")

@@ -267,6 +267,24 @@ ETH:
 python runbot.py --exchange extended --ticker ETH --quantity 0.1 --take-profit 0 --max-orders 40 --wait-time 450 --grid-step 0.01
 ```
 
+### Extended Grid Trading (range grid, arithmetic/geometric spacing, long/short)
+
+Use `--strategy grid` to start the grid strategy (requires range, number of levels, per-grid size, direction and spacing mode):
+
+```bash
+python runbot.py --exchange extended --strategy grid --ticker ETH \
+  --grid-direction long --grid-spacing arith \
+  --grid-lower 1800 --grid-upper 2200 --grid-grids 21 --grid-size 0.02
+```
+
+Short grid + geometric spacing example:
+
+```bash
+python runbot.py --exchange extended --strategy grid --ticker ETH \
+  --grid-direction short --grid-spacing geo \
+  --grid-lower 1800 --grid-upper 2200 --grid-grids 21 --grid-size 0.02
+```
+
 ## 🆕 Hedge Mode
 
 The new Hedge Mode (`hedge_mode.py`) is an trading strategy that reduces risk by simultaneously hedging trades across two exchanges:
