@@ -13,6 +13,7 @@ from decimal import Decimal
 from trading_bot import TradingBot, TradingConfig
 from exchanges import ExchangeFactory
 from grid_bot import GridBot, GridConfig
+from mm_bot import MarketMakerBot, MarketMakerConfig
 
 
 def parse_arguments():
@@ -52,8 +53,8 @@ def parse_arguments():
                         help='Use the Boost mode for volume boosting')
 
     # Strategy selection
-    parser.add_argument('--strategy', type=str, default='maker_tp', choices=['maker_tp', 'grid'],
-                        help="Strategy to run: 'maker_tp' (default) or 'grid'")
+    parser.add_argument('--strategy', type=str, default='maker_tp', choices=['maker_tp', 'grid', 'mm'],
+                        help="Strategy to run: 'maker_tp' (default), 'grid' or 'mm'")
 
     # Grid strategy parameters (used when --strategy grid)
     parser.add_argument('--grid-direction', type=str, default='long', choices=['long', 'short'],
@@ -68,6 +69,20 @@ def parse_arguments():
                         help="Number of grid levels (default: 10)")
     parser.add_argument('--grid-size', type=Decimal, default=Decimal('-1'),
                         help="Per-grid order size (required for grid strategy)")
+    
+    # Market Maker strategy parameters (used when --strategy mm)
+    parser.add_argument('--mm-upper', type=Decimal, default=Decimal('-1'),
+                        help="MM: Upper price bound")
+    parser.add_argument('--mm-lower', type=Decimal, default=Decimal('-1'),
+                        help="MM: Lower price bound")
+    parser.add_argument('--mm-step', type=Decimal, default=Decimal('5'),
+                        help="MM: Price step between levels")
+    parser.add_argument('--mm-grids', type=int, default=5,
+                        help="MM: Number of orders per side")
+    parser.add_argument('--mm-spread', type=Decimal, default=Decimal('0.0008'),
+                        help="MM: Spread from mid price (e.g. 0.0008 for 0.08%%)")
+    parser.add_argument('--mm-quantity', type=Decimal, default=Decimal('0.002'),
+                        help="MM: Order quantity per level")
 
     return parser.parse_args()
 
@@ -146,6 +161,25 @@ async def main():
         )
 
         bot = GridBot(grid_config)
+        await bot.run()
+    elif args.strategy == 'mm':
+        if args.mm_lower <= 0 or args.mm_upper <= 0:
+            raise ValueError("--mm-lower and --mm-upper must be set (> 0) when --strategy mm")
+        
+        mm_config = MarketMakerConfig(
+            exchange=args.exchange.lower(),
+            ticker=args.ticker.upper(),
+            contract_id='', # will be set in bot.run()
+            tick_size=Decimal(0),
+            upper_price=args.mm_upper,
+            lower_price=args.mm_lower,
+            price_step=args.mm_step,
+            grid_count=args.mm_grids,
+            price_spread=args.mm_spread,
+            order_quantity=args.mm_quantity
+        )
+        
+        bot = MarketMakerBot(mm_config)
         await bot.run()
     else:
         config = TradingConfig(
