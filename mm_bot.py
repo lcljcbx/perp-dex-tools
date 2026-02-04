@@ -41,7 +41,7 @@ class MarketMakerConfig:
     rebalance_threshold: Decimal = Decimal("0.001") # Price change threshold to trigger rebalance (0.1%)
     
     # Safety parameters
-    emergency_sleep_time: int = 10  # Seconds to sleep after emergency close
+    emergency_sleep_time: int = 600  # Seconds to sleep after emergency close
 
     @property
     def quantity(self) -> Decimal:
