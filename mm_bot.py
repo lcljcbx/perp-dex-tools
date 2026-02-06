@@ -73,6 +73,16 @@ class MarketMakerBot:
         self.active_order_ids: List[str] = []
         
         self.loop: Optional[asyncio.AbstractEventLoop] = None
+        self.position_check_event = asyncio.Event()
+
+    async def _on_order_update(self, data: dict):
+        """Callback for order updates from the exchange."""
+        status = data.get('status')
+        if status in ['FILLED', 'PARTIALLY_FILLED']:
+            self.logger.log(f"Order filled: {data.get('order_id')} {status} {data.get('filled_size')} @ {data.get('price')}", "WARNING")
+            # Trigger immediate check
+            self.emergency_mode = True
+            self.position_check_event.set()
 
     async def run(self):
         """Main entry point."""
@@ -81,6 +91,11 @@ class MarketMakerBot:
         
         # Connect to exchange
         await self.exchange_client.connect()
+        
+        # Register callback if supported
+        if hasattr(self.exchange_client, "setup_order_update_handler"):
+            self.logger.log("Registering order update handler...", "INFO")
+            self.exchange_client.setup_order_update_handler(self._on_order_update)
         
         # Get contract details
         self.config.contract_id, self.config.tick_size = await self.exchange_client.get_contract_attributes()
@@ -93,7 +108,7 @@ class MarketMakerBot:
             # Main strategy loop
             while not self.shutdown_requested:
                 if self.emergency_mode:
-                    await asyncio.sleep(1)
+                    await asyncio.sleep(0.1)
                     continue
                 
                 await self._market_making_logic()
@@ -116,6 +131,18 @@ class MarketMakerBot:
     async def _market_making_logic(self):
         """Core logic to check price and update orders."""
         try:
+            if self.emergency_mode:
+                return
+
+            # 0. Fail-safe: Check position in main loop to prevent fighting with emergency logic
+            # This is critical to avoid "New order cost exceeds available balance" errors
+            # when a fill happens but monitor hasn't reacted yet.
+            position = await self.exchange_client.get_account_positions()
+            if abs(position) > 0:
+                self.logger.log(f"Position detected in main loop: {position}. Triggering Emergency.", "WARNING")
+                await self._execute_emergency_protocol(position)
+                return
+
             # 1. Get current price (Mid Price)
             best_bid, best_ask = await self.exchange_client.fetch_bbo_prices(self.config.contract_id)
             if best_bid <= 0 or best_ask <= 0:
@@ -152,11 +179,17 @@ class MarketMakerBot:
 
     async def _place_grid_orders(self, center_price: Decimal):
         """Cancel existing orders and place new ones around center_price."""
+        if self.emergency_mode:
+            return
+
         self.logger.log(f"Placing grid orders around {center_price}...", "INFO")
         
         # 1. Cancel all existing
         await self._cancel_all_orders()
         
+        if self.emergency_mode:
+            return
+
         # 2. Calculate levels
         buy_orders = []
         sell_orders = []
@@ -166,8 +199,6 @@ class MarketMakerBot:
         
         for i in range(self.config.grid_count):
             # Calculate distance: spread + (i * step)
-            # Example: i=0 -> spread
-            #          i=1 -> spread + step
             distance = spread_value + (Decimal(i) * self.config.price_step)
             
             bid_price = center_price - distance
@@ -188,6 +219,7 @@ class MarketMakerBot:
         
         # Place Buys
         for p in buy_orders:
+            if self.emergency_mode: break
             tasks.append(self.exchange_client.place_limit_order(
                 self.config.contract_id,
                 self.config.order_quantity,
@@ -198,6 +230,7 @@ class MarketMakerBot:
             
         # Place Sells
         for p in sell_orders:
+            if self.emergency_mode: break
             tasks.append(self.exchange_client.place_limit_order(
                 self.config.contract_id,
                 self.config.order_quantity,
@@ -206,6 +239,10 @@ class MarketMakerBot:
                 post_only=True
             ))
             
+        if self.emergency_mode:
+            self.logger.log("Emergency mode detected during order placement. Aborting.", "WARNING")
+            return
+
         results = await asyncio.gather(*tasks, return_exceptions=True)
         
         success_count = 0
@@ -236,6 +273,16 @@ class MarketMakerBot:
         self.logger.log("Position monitor started.", "INFO")
         while not self.shutdown_requested:
             try:
+                # Wait for trigger or timeout
+                try:
+                    await asyncio.wait_for(self.position_check_event.wait(), timeout=1.0)
+                    self.position_check_event.clear()
+                except asyncio.TimeoutError:
+                    pass # Check periodically anyway
+                
+                if self.shutdown_requested:
+                    break
+
                 # Check position
                 # Note: get_account_positions usually returns a Decimal size
                 position = await self.exchange_client.get_account_positions()
@@ -245,7 +292,6 @@ class MarketMakerBot:
                     self.logger.log(f"Emergency Triggered! Position detected: {position}", "WARNING")
                     await self._execute_emergency_protocol(position)
                 
-                await asyncio.sleep(1) # Check every second
             except Exception as e:
                 self.logger.log(f"Monitor error: {e}", "ERROR")
                 await asyncio.sleep(1)
