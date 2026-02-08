@@ -113,6 +113,7 @@ class GridBot:
                 # Only act on full fills (SDK emits FILLED); partials are ignored here.
                 if kind == "OPEN":
                     # open filled -> place corresponding close
+                    self.open_order_ids.pop(idx, None)
                     self.level_phases[idx] = "CLOSE"
                     self.logger.log(f"[GRID] OPEN filled at level {idx} ({self.levels[idx]}), placing CLOSE", "INFO")
                     if self.loop:
@@ -121,12 +122,16 @@ class GridBot:
                         )
                 elif kind == "CLOSE":
                     # close filled -> re-place open at same level
+                    self.close_order_ids.pop(idx, None)
                     self.level_phases[idx] = "OPEN"
                     self.logger.log(f"[GRID] CLOSE filled for level {idx}, re-placing OPEN", "INFO")
                     if self.loop:
                         self.loop.call_soon_threadsafe(
                             lambda: asyncio.create_task(self._place_open_for_level(idx))
                         )
+                
+                # cleanup order map
+                self.order_map.pop(order_id, None)
 
             except Exception as e:
                 self.logger.log(f"[GRID] handler error: {e}", "ERROR")
