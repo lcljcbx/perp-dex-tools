@@ -85,6 +85,9 @@ class GridBot:
         # per level active order ids
         self.open_order_ids: Dict[int, str] = {}
         self.close_order_ids: Dict[int, str] = {}
+        
+        # level state tracking: idx -> "OPEN" | "CLOSE"
+        self.level_phases: Dict[int, str] = {}
 
         self._setup_order_handler()
 
@@ -110,6 +113,7 @@ class GridBot:
                 # Only act on full fills (SDK emits FILLED); partials are ignored here.
                 if kind == "OPEN":
                     # open filled -> place corresponding close
+                    self.level_phases[idx] = "CLOSE"
                     self.logger.log(f"[GRID] OPEN filled at level {idx} ({self.levels[idx]}), placing CLOSE", "INFO")
                     if self.loop:
                         self.loop.call_soon_threadsafe(
@@ -117,6 +121,7 @@ class GridBot:
                         )
                 elif kind == "CLOSE":
                     # close filled -> re-place open at same level
+                    self.level_phases[idx] = "OPEN"
                     self.logger.log(f"[GRID] CLOSE filled for level {idx}, re-placing OPEN", "INFO")
                     if self.loop:
                         self.loop.call_soon_threadsafe(
@@ -231,6 +236,7 @@ class GridBot:
     async def _seed_open_orders(self):
         # Place initial open orders at every level (directional one-side)
         for idx in range(len(self.levels)):
+            self.level_phases[idx] = "OPEN"
             if self.config.max_concurrent_orders is not None:
                 if len(self.open_order_ids) + len(self.close_order_ids) >= self.config.max_concurrent_orders:
                     break
@@ -351,6 +357,46 @@ class GridBot:
         self.close_order_ids.clear()
         self.order_map.clear()
 
+    async def _maintenance_loop(self):
+        """Periodically check grid consistency and retry missing orders."""
+        self.logger.log("Starting maintenance loop...", "INFO")
+        while not self.shutdown_requested:
+            try:
+                await asyncio.sleep(10)
+                
+                # Check each level's state vs reality
+                for idx in list(self.level_phases.keys()):
+                    phase = self.level_phases[idx]
+                    
+                    if phase == "OPEN":
+                        # We expect an OPEN order
+                        if idx not in self.open_order_ids:
+                            # Verify we don't have a close order (conflicting state)
+                            if idx in self.close_order_ids:
+                                self.logger.log(f"[GRID] Maintenance: Level {idx} has CLOSE order but phase is OPEN. Correcting phase.", "WARNING")
+                                self.level_phases[idx] = "CLOSE"
+                                continue
+                            
+                            self.logger.log(f"[GRID] Maintenance: Level {idx} phase is OPEN but no order. Retrying OPEN.", "WARNING")
+                            await self._place_open_for_level(idx)
+                            
+                    elif phase == "CLOSE":
+                        # We expect a CLOSE order
+                        if idx not in self.close_order_ids:
+                            # Verify we don't have an open order
+                            if idx in self.open_order_ids:
+                                self.logger.log(f"[GRID] Maintenance: Level {idx} has OPEN order but phase is CLOSE. Correcting phase.", "WARNING")
+                                self.level_phases[idx] = "OPEN"
+                                continue
+                                
+                            self.logger.log(f"[GRID] Maintenance: Level {idx} phase is CLOSE but no order. Retrying CLOSE.", "WARNING")
+                            # Note: we lost filled_size info here if we crashed/restarted, default to grid_size
+                            await self._place_close_for_level(idx, self.config.grid_size)
+                            
+            except Exception as e:
+                self.logger.log(f"[GRID] Maintenance error: {e}", "ERROR")
+                await asyncio.sleep(5)
+
     async def run(self):
         self.loop = asyncio.get_running_loop()
 
@@ -370,6 +416,7 @@ class GridBot:
 
         # Start exit condition monitor
         monitor_task = asyncio.create_task(self._monitor_exit_conditions())
+        maintenance_task = asyncio.create_task(self._maintenance_loop())
 
         # idle loop; work is done by callbacks
         while not self.shutdown_requested:
@@ -378,6 +425,8 @@ class GridBot:
         # If we broke out of loop, ensure monitor is cancelled if it's still running
         if not monitor_task.done():
             monitor_task.cancel()
+        if not maintenance_task.done():
+            maintenance_task.cancel()
 
     async def graceful_shutdown(self, reason: str = "Unknown"):
         self.logger.log(f"[GRID] shutdown: {reason}", "INFO")
