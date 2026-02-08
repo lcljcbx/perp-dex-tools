@@ -47,6 +47,10 @@ class GridConfig:
     # execution controls
     post_only: bool = True
     max_concurrent_orders: Optional[int] = None  # optional extra cap
+    
+    # exit conditions
+    take_profit_price: Optional[Decimal] = None
+    stop_loss_price: Optional[Decimal] = None
 
     @property
     def open_side(self) -> str:
@@ -233,6 +237,120 @@ class GridBot:
             await self._place_open_for_level(idx)
             await asyncio.sleep(0.05)
 
+    async def _monitor_exit_conditions(self):
+        """Monitor price for TP/SL conditions."""
+        self.logger.log("Starting exit condition monitor...", "INFO")
+        while not self.shutdown_requested:
+            try:
+                # 1. Get current price
+                best_bid, best_ask = await self.exchange_client.fetch_bbo_prices(self.config.contract_id)
+                if best_bid <= 0 or best_ask <= 0:
+                    await asyncio.sleep(1)
+                    continue
+                
+                mid_price = (best_bid + best_ask) / 2
+                
+                # 2. Check TP
+                if self.config.take_profit_price and self.config.take_profit_price > 0:
+                    triggered = False
+                    if self.config.direction == "long" and mid_price >= self.config.take_profit_price:
+                        triggered = True
+                    elif self.config.direction == "short" and mid_price <= self.config.take_profit_price:
+                        triggered = True
+                        
+                    if triggered:
+                        self.logger.log(f"[GRID] Take Profit triggered at {mid_price} (Target: {self.config.take_profit_price})", "WARNING")
+                        await self._execute_take_profit()
+                        return
+
+                # 3. Check SL
+                if self.config.stop_loss_price and self.config.stop_loss_price > 0:
+                    triggered = False
+                    if self.config.direction == "long" and mid_price <= self.config.stop_loss_price:
+                        triggered = True
+                    elif self.config.direction == "short" and mid_price >= self.config.stop_loss_price:
+                        triggered = True
+                        
+                    if triggered:
+                        self.logger.log(f"[GRID] Stop Loss triggered at {mid_price} (Target: {self.config.stop_loss_price})", "WARNING")
+                        await self._execute_stop_loss()
+                        return
+
+                await asyncio.sleep(1)
+            except Exception as e:
+                self.logger.log(f"[GRID] Monitor error: {e}", "ERROR")
+                await asyncio.sleep(5)
+
+    async def _execute_take_profit(self):
+        """Execute TP logic: Cancel all orders and exit."""
+        self.shutdown_requested = True # Stop grid logic
+        self.logger.log("[GRID] Executing Take Profit...", "INFO")
+        
+        # Cancel orders
+        await self._cancel_all_orders()
+        
+        self.logger.log("[GRID] Take Profit execution complete. Exiting.", "INFO")
+        # Ensure we disconnect
+        await self.exchange_client.disconnect()
+        # Raise SystemExit or just let the run loop finish (shutdown_requested is True)
+        # Since run loop waits on shutdown_requested, it will exit.
+
+    async def _execute_stop_loss(self):
+        """Execute SL logic: Cancel orders, close position, exit."""
+        self.shutdown_requested = True # Stop grid logic
+        self.logger.log("[GRID] Executing Stop Loss...", "WARNING")
+        
+        # 1. Cancel orders
+        await self._cancel_all_orders()
+        
+        # 2. Close position
+        try:
+            position = await self.exchange_client.get_account_positions()
+            if abs(position) > 0:
+                self.logger.log(f"[GRID] Closing position {position}...", "WARNING")
+                side = "sell" if position > 0 else "buy"
+                qty = abs(position)
+                
+                # Try market close first
+                if hasattr(self.exchange_client, "place_market_order"):
+                    res = await self.exchange_client.place_market_order(
+                        self.config.contract_id, qty, side
+                    )
+                else:
+                    # Aggressive limit close
+                    best_bid, best_ask = await self.exchange_client.fetch_bbo_prices(self.config.contract_id)
+                    # 5% slippage allowance
+                    price = best_ask * Decimal("1.05") if side == "buy" else best_bid * Decimal("0.95")
+                    res = await self.exchange_client.place_limit_order(
+                        self.config.contract_id, qty, price, side, reduce_only=True
+                    )
+                
+                if res.success:
+                    self.logger.log("[GRID] Position closed successfully.", "INFO")
+                else:
+                    self.logger.log(f"[GRID] Failed to close position: {res.error_message}", "ERROR")
+            else:
+                self.logger.log("[GRID] No position to close.", "INFO")
+                
+        except Exception as e:
+            self.logger.log(f"[GRID] Error closing position: {e}", "ERROR")
+
+        self.logger.log("[GRID] Stop Loss execution complete. Exiting.", "INFO")
+        await self.exchange_client.disconnect()
+
+    async def _cancel_all_orders(self):
+        """Cancel all active grid orders."""
+        all_ids = list(self.open_order_ids.values()) + list(self.close_order_ids.values())
+        if not all_ids:
+            return
+            
+        self.logger.log(f"[GRID] Cancelling {len(all_ids)} orders...", "INFO")
+        tasks = [self.exchange_client.cancel_order(oid) for oid in all_ids]
+        await asyncio.gather(*tasks, return_exceptions=True)
+        self.open_order_ids.clear()
+        self.close_order_ids.clear()
+        self.order_map.clear()
+
     async def run(self):
         self.loop = asyncio.get_running_loop()
 
@@ -250,9 +368,16 @@ class GridBot:
 
         await self._seed_open_orders()
 
+        # Start exit condition monitor
+        monitor_task = asyncio.create_task(self._monitor_exit_conditions())
+
         # idle loop; work is done by callbacks
         while not self.shutdown_requested:
             await asyncio.sleep(5)
+            
+        # If we broke out of loop, ensure monitor is cancelled if it's still running
+        if not monitor_task.done():
+            monitor_task.cancel()
 
     async def graceful_shutdown(self, reason: str = "Unknown"):
         self.logger.log(f"[GRID] shutdown: {reason}", "INFO")

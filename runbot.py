@@ -69,6 +69,10 @@ def parse_arguments():
                         help="Number of grid levels (default: 10)")
     parser.add_argument('--grid-size', type=Decimal, default=Decimal('-1'),
                         help="Per-grid order size (required for grid strategy)")
+    parser.add_argument('--grid-tp', type=Decimal, default=Decimal('-1'),
+                        help="Grid Take Profit Price (default: -1, no TP)")
+    parser.add_argument('--grid-sl', type=Decimal, default=Decimal('-1'),
+                        help="Grid Stop Loss Price (default: -1, no SL)")
     
     # Market Maker strategy parameters (used when --strategy mm)
     parser.add_argument('--mm-upper', type=Decimal, default=Decimal('-1'),
@@ -158,6 +162,8 @@ async def main():
             upper=args.grid_upper,
             grids=args.grid_grids,
             grid_size=args.grid_size,
+            take_profit_price=args.grid_tp if args.grid_tp > 0 else None,
+            stop_loss_price=args.grid_sl if args.grid_sl > 0 else None,
         )
 
         bot = GridBot(grid_config)
